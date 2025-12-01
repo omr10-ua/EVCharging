@@ -132,12 +132,31 @@ def monitoring_loop():
                             if action == "stop":
                                 forced_stop = True
                                 log_message('[MONITOR] 🛑 Comando PARAR recibido de CENTRAL')
+                                
+                                # ✅ Notificar estado PARADO a Central
+                                status_msg = {
+                                    "type": "status_change",
+                                    "cp_id": CP_ID,
+                                    "state": "PARADO"
+                                }
+                                send_to_central(status_msg)
+                                
                                 # Enviar ACK
                                 ack = {"type": "command_ack", "cp_id": CP_ID, "action": "stop", "status": "ok"}
                                 sock_central.sendall((json.dumps(ack) + "\n").encode('utf-8'))
+                                
                             elif action == "resume":
                                 forced_stop = False
                                 log_message('[MONITOR] ▶️  Comando REANUDAR recibido de CENTRAL')
+                                
+                                # ✅ Notificar estado ACTIVADO a Central
+                                status_msg = {
+                                    "type": "status_change",
+                                    "cp_id": CP_ID,
+                                    "state": "ACTIVADO"
+                                }
+                                send_to_central(status_msg)
+                                
                                 # Enviar ACK
                                 ack = {"type": "command_ack", "cp_id": CP_ID, "action": "resume", "status": "ok"}
                                 sock_central.sendall((json.dumps(ack) + "\n").encode('utf-8'))

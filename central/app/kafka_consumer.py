@@ -3,7 +3,7 @@ import json
 import threading
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
-from .data_manager import update_cp
+from .data_manager import update_cp, get_cp
 
 def _make_bootstrap():
     host = os.environ.get("KAFKA_HOST", os.environ.get("KAFKA_BROKER", "kafka"))
@@ -94,29 +94,53 @@ class KafkaCentralConsumer:
                 current_price = message.get("current_price", 0.0)
                 driver_id = message.get("driver_id")
                 
-                # Actualizar estado en BD
-                fields = {
-                    "state": "SUMINISTRANDO" if is_supplying else "ACTIVADO",
-                    "current_kw": float(consumption_kw),
-                    "total_kwh": float(total_kwh),
-                    "current_euros": float(total_kwh) * float(current_price)
-                }
+                # ✅ IMPORTANTE: Verificar estado actual antes de actualizar
+                current_cp = get_cp(cp_id)
                 
-                if driver_id:
-                    fields["current_driver"] = driver_id
+                # Si el CP no existe o está DESCONECTADO, ignorar telemetría
+                if not current_cp:
+                    print(f"[KAFKA CONSUMER] ⚠️  Telemetría de CP desconocido: {cp_id}")
+                    return
                 
-                # Si no está suministrando, limpiar campos
-                if not is_supplying:
-                    fields["current_kw"] = 0.0
-                    fields["total_kwh"] = 0.0
-                    fields["current_euros"] = 0.0
-                    fields["current_driver"] = None
+                if current_cp.get("state") == "DESCONECTADO":
+                    # CP desconectado, no procesar telemetría
+                    print(f"[KAFKA CONSUMER] 🚫 Ignorando telemetría de {cp_id} (DESCONECTADO)")
+                    return
+                
+                # No sobrescribir estados: PARADO o AVERIADO
+                if current_cp.get("state") in ["PARADO", "AVERIADO"]:
+                    # Solo actualizar campos de consumo, NO el estado
+                    fields = {
+                        "current_kw": float(consumption_kw),
+                        "total_kwh": float(total_kwh),
+                        "current_euros": float(total_kwh) * float(current_price)
+                    }
+                    if driver_id:
+                        fields["current_driver"] = driver_id
+                else:
+                    # Estado normal: actualizar todo incluido el estado
+                    fields = {
+                        "state": "SUMINISTRANDO" if is_supplying else "ACTIVADO",
+                        "current_kw": float(consumption_kw),
+                        "total_kwh": float(total_kwh),
+                        "current_euros": float(total_kwh) * float(current_price)
+                    }
+                    
+                    if driver_id:
+                        fields["current_driver"] = driver_id
+                    
+                    # Si no está suministrando, limpiar campos
+                    if not is_supplying:
+                        fields["current_kw"] = 0.0
+                        fields["total_kwh"] = 0.0
+                        fields["current_euros"] = 0.0
+                        fields["current_driver"] = None
                 
                 update_cp(cp_id, **fields)
                 
                 # Debug
                 if is_supplying:
-                    print(f"[KAFKA CONSUMER] 📊 {cp_id}: {consumption_kw:.1f} kW, {total_kwh:.2f} kWh, €{fields['current_euros']:.2f}")
+                    print(f"[KAFKA CONSUMER] 📊 {cp_id}: {consumption_kw:.1f} kW, {total_kwh:.2f} kWh, €{fields.get('current_euros', 0):.2f}")
                 
             elif msg_type == "central_snapshot":
                 # Ignorar snapshots propios

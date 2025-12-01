@@ -222,6 +222,13 @@ class CPSocketServer:
                         status = obj.get("status")
                         print(f"[CP SOCKET] 📨 ACK de {cp_id}: {action} -> {status}")
                     
+                    # ✅ NUEVO: Cambio de estado confirmado por CP
+                    elif mtype == "status_change":
+                        cp_id = obj.get("cp_id")
+                        new_state = obj.get("state")
+                        update_cp(cp_id, state=new_state)
+                        print(f"[CP SOCKET] 🔄 Estado confirmado de {cp_id}: {new_state}")
+                    
                     else:
                         # Mensaje desconocido - ignorar
                         pass
@@ -234,14 +241,24 @@ class CPSocketServer:
             # Cleanup al desconectar
             if cp_id:
                 try:
-                    update_cp(cp_id, state="DESCONECTADO")
-                    self._notify_web(f"CP {cp_id} desconectado (conexión perdida)", 'info')
-                except:
-                    pass
+                    # Limpiar todos los campos y marcar desconectado
+                    update_cp(
+                        cp_id, 
+                        state="DESCONECTADO",
+                        current_kw=0.0,
+                        total_kwh=0.0,
+                        current_euros=0.0,
+                        current_driver=None
+                    )
+                    print(f"[CP SOCKET] 📴 CP {cp_id} marcado como DESCONECTADO en BD")
+                    self._notify_web(f"CP {cp_id} desconectado", 'info')
+                except Exception as e:
+                    print(f"[CP SOCKET] ❌ Error al marcar {cp_id} como desconectado: {e}")
                 
                 with self._clients_lock:
                     if cp_id in self._clients:
                         del self._clients[cp_id]
+                        print(f"[CP SOCKET] 🗑️  CP {cp_id} eliminado de lista de clientes")
             
             try:
                 conn.close()

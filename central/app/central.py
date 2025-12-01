@@ -150,6 +150,19 @@ def periodic_monitor_publish(producer, interval=5):
             print("[MONITOR PUBLISH] error:", e)
         time.sleep(interval)
 
+def reset_all_cps_to_disconnected():
+    """Marca todos los CPs como DESCONECTADO al arrancar Central"""
+    data = load_data()
+    cps = data.get("charging_points", {})
+    
+    if cps:
+        print(f"[CENTRAL] 📝 Marcando {len(cps)} CPs como DESCONECTADO...")
+        for cp_id in cps:
+            update_cp(cp_id, state="DESCONECTADO")
+        print(f"[CENTRAL] ✅ {len(cps)} CPs marcados como DESCONECTADO")
+    else:
+        print("[CENTRAL] ℹ️  No hay CPs previos registrados")
+
 # ==================== FUNCIÓN PRINCIPAL ====================
 
 def main():
@@ -168,6 +181,9 @@ def main():
     print(f"[CENTRAL] 🔌 Socket CP Server: puerto {cp_port}")
     print(f"[CENTRAL] 🌐 Web Panel: http://0.0.0.0:{api_port}")
     print("="*60)
+    
+    # ✅ NUEVO: Marcar todos los CPs como DESCONECTADO al arrancar
+    reset_all_cps_to_disconnected()
     
     # Inicializar Kafka Producer
     kafka_producer = KafkaCentralProducer()
