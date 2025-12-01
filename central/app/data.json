@@ -1,5 +1,28 @@
 {
-  "charging_points": {},
-  "drivers": {},
-  "sessions": []
+    "charging_points": {
+        "CP001": {
+            "id": "CP001",
+            "location": "Valencia Centro",
+            "price": 0.35,
+            "state": "DESCONECTADO",
+            "current_kw": 0.0,
+            "current_euros": 0.0,
+            "current_driver": null,
+            "total_kwh": 0.0,
+            "last_update": "2025-12-01T11:24:40.245695"
+        },
+        "CP002": {
+            "id": "CP002",
+            "location": "Torrellano",
+            "price": 0.35,
+            "state": "DESCONECTADO",
+            "current_kw": 0.0,
+            "current_euros": 0.0,
+            "current_driver": null,
+            "total_kwh": 0.0,
+            "last_update": "2025-12-01T11:11:11.502484"
+        }
+    },
+    "drivers": {},
+    "sessions": []
 }

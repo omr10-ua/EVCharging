@@ -1,6 +1,7 @@
 import json
 import threading
 import os
+import time
 from datetime import datetime
 
 DATA_FILE = os.path.join(os.path.dirname(__file__), "data.json")
@@ -14,16 +15,54 @@ def load_data():
         save_data(data)
         return data
 
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    with _lock:
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"[DATA MANAGER] Error loading data: {e}, creating new file")
+            data = {"charging_points": {}, "drivers": {}, "sessions": []}
+            save_data(data)
+            return data
 
 def save_data(data):
     """Guarda el JSON atomizando con un lock para evitar corrupciones."""
     with _lock:
-        tmp = DATA_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        os.replace(tmp, DATA_FILE)
+        # Intentar con reintentos
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                tmp = DATA_FILE + f".tmp.{os.getpid()}.{time.time()}"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                
+                # Intentar replace
+                try:
+                    os.replace(tmp, DATA_FILE)
+                    return
+                except OSError:
+                    # Si falla, intentar borrar el destino primero
+                    try:
+                        if os.path.exists(DATA_FILE):
+                            os.remove(DATA_FILE)
+                        os.rename(tmp, DATA_FILE)
+                        return
+                    except Exception:
+                        pass
+                
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    print(f"[DATA MANAGER] Error saving data after {max_retries} attempts: {e}")
+                    # Último intento: guardar directamente
+                    try:
+                        with open(DATA_FILE, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=4, ensure_ascii=False)
+                    except Exception as e2:
+                        print(f"[DATA MANAGER] CRITICAL: Cannot save data: {e2}")
+                else:
+                    time.sleep(0.1)  # Esperar un poco antes de reintentar
+            
+            time.sleep(0.05)  # Pequeña pausa entre reintentos
 
 def ensure_cp_exists(cp_id, location=None, price=None):
     """Si no existe el CP en el JSON, lo crea con valores por defecto."""
@@ -37,6 +76,7 @@ def ensure_cp_exists(cp_id, location=None, price=None):
             "current_kw": 0.0,
             "current_euros": 0.0,
             "current_driver": None,
+            "total_kwh": 0.0,
             "last_update": datetime.utcnow().isoformat()
         }
         save_data(data)

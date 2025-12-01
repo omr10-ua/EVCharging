@@ -1,47 +1,187 @@
 #!/usr/bin/env python3
 """
-EV_CP_M - Monitor del punto de recarga (standalone Python)
-Se conecta al Engine por sockets y a Central por sockets para autenticación y reporte de estado de salud.
+EV_CP_M - Monitor del punto de recarga (CORREGIDO)
+Se conecta al Engine por sockets y a Central (puerto 5001) por sockets 
+para autenticación y reporte de estado de salud.
 """
 
 import socket
 import time
 import os
+import json
+import sys
+
+# Añadir path para imports relativos
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.helper import log_message
 
 # Configuración desde variables de entorno
 CP_ID = os.getenv('CP_ID', 'CP001')
+CP_LOCATION = os.getenv('CP_LOCATION', 'Valencia Centro')
+CP_PRICE = float(os.getenv('CP_PRICE', '0.35'))
+
 ENGINE_HOST = os.getenv('ENGINE_HOST', 'localhost')
 ENGINE_MONITOR_PORT = int(os.getenv('ENGINE_MONITOR_PORT', 9101))
+
 CENTRAL_HOST = os.getenv('CENTRAL_HOST', 'localhost')
-CENTRAL_PORT = int(os.getenv('CENTRAL_PORT', 9000))
+CENTRAL_PORT = int(os.getenv('CENTRAL_PORT', 5001))  # ✅ CORREGIDO: 9000 → 5001
 
-# Conectar a Central para autenticación
-try:
-    sock_central = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock_central.connect((CENTRAL_HOST, CENTRAL_PORT))
-    sock_central.sendall(f'AUTH:{CP_ID}\n'.encode())
-    log_message(f'[MONITOR] Autenticado en CENTRAL con CP {CP_ID}')
-except Exception as e:
-    log_message(f'[MONITOR] ERROR al conectar con CENTRAL: {e}')
-    exit(1)
+sock_central = None
+registered = False
 
-# Loop principal de monitorización
-while True:
+def connect_to_central():
+    """Conecta a Central y registra el CP"""
+    global sock_central, registered
+    
+    max_retries = 5
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            sock_central = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock_central.settimeout(5)
+            sock_central.connect((CENTRAL_HOST, CENTRAL_PORT))
+            
+            # ✅ CORREGIDO: Enviar registro en formato JSON
+            register_msg = {
+                "type": "register",
+                "cp_id": CP_ID,
+                "location": CP_LOCATION,
+                "price": CP_PRICE
+            }
+            
+            msg_str = json.dumps(register_msg) + "\n"
+            sock_central.sendall(msg_str.encode('utf-8'))
+            
+            # Esperar ACK
+            response = sock_central.recv(4096).decode('utf-8').strip()
+            if response:
+                ack = json.loads(response)
+                if ack.get("type") == "register_ack" and ack.get("status") == "ok":
+                    log_message(f'[MONITOR] ✅ Registrado en CENTRAL: {CP_ID} @ {CP_LOCATION} (€{CP_PRICE}/kWh)')
+                    registered = True
+                    return True
+            
+            log_message('[MONITOR] ⚠️  No se recibió ACK correcto')
+            sock_central.close()
+            
+        except Exception as e:
+            log_message(f'[MONITOR] ❌ Error conectando a CENTRAL (intento {retry_count+1}/{max_retries}): {e}')
+            if sock_central:
+                sock_central.close()
+        
+        retry_count += 1
+        time.sleep(2)
+    
+    log_message('[MONITOR] ❌ No se pudo conectar a CENTRAL después de varios intentos')
+    return False
+
+def send_to_central(message_dict):
+    """Envía un mensaje JSON a Central"""
+    global sock_central
+    
+    try:
+        msg_str = json.dumps(message_dict) + "\n"
+        sock_central.sendall(msg_str.encode('utf-8'))
+        return True
+    except Exception as e:
+        log_message(f'[MONITOR] Error enviando mensaje a Central: {e}')
+        return False
+
+def check_engine_health():
+    """Comprueba el estado de salud del Engine"""
     try:
         sock_engine = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock_engine.settimeout(1)
+        sock_engine.settimeout(2)
         sock_engine.connect((ENGINE_HOST, ENGINE_MONITOR_PORT))
         sock_engine.sendall(b'HEALTH_CHECK')
-        status = sock_engine.recv(1024).decode()
-
-        if status == 'KO':
-            sock_central.sendall(f'FAIL:{CP_ID}\n'.encode())
-            log_message('[MONITOR] AVERÍA detectada, notificando CENTRAL')
+        status = sock_engine.recv(1024).decode().strip()
         sock_engine.close()
+        
+        return status
+        
+    except Exception as e:
+        log_message(f'[MONITOR] ⚠️  No se pudo conectar con Engine: {e}')
+        return "DISCONNECTED"
 
-    except Exception:
-        sock_central.sendall(f'FAIL:{CP_ID}\n'.encode())
-        log_message('[MONITOR] ERROR conexión con Engine, notificando CENTRAL')
+def monitoring_loop():
+    """Loop principal de monitorización"""
+    global sock_central, registered
+    
+    last_status = "OK"
+    
+    while True:
+        try:
+            # Verificar si seguimos conectados a Central
+            if not registered or sock_central is None:
+                log_message('[MONITOR] Intentando reconectar a CENTRAL...')
+                if not connect_to_central():
+                    time.sleep(5)
+                    continue
+            
+            # Comprobar salud del Engine
+            engine_status = check_engine_health()
+            
+            # Solo enviar si hay cambio de estado
+            if engine_status != last_status:
+                if engine_status == "KO":
+                    fault_msg = {
+                        "type": "fault",
+                        "cp_id": CP_ID,
+                        "msg": "Engine reportó estado KO"
+                    }
+                    if send_to_central(fault_msg):
+                        log_message('[MONITOR] 🔴 AVERÍA detectada, notificado a CENTRAL')
+                        last_status = "KO"
+                
+                elif engine_status == "DISCONNECTED":
+                    disconnect_msg = {
+                        "type": "fault",
+                        "cp_id": CP_ID,
+                        "msg": "No se puede conectar con Engine"
+                    }
+                    if send_to_central(disconnect_msg):
+                        log_message('[MONITOR] 🔴 Engine DESCONECTADO, notificado a CENTRAL')
+                        last_status = "DISCONNECTED"
+                
+                elif engine_status == "OK" and last_status != "OK":
+                    # Recuperación de fallo
+                    recovery_msg = {
+                        "type": "register",  # Re-registrar para volver a ACTIVADO
+                        "cp_id": CP_ID,
+                        "location": CP_LOCATION,
+                        "price": CP_PRICE
+                    }
+                    if send_to_central(recovery_msg):
+                        log_message('[MONITOR] 🟢 Engine recuperado, notificado a CENTRAL')
+                        last_status = "OK"
+            
+        except KeyboardInterrupt:
+            log_message('[MONITOR] Saliendo...')
+            # Notificar desconexión
+            try:
+                disconnect_msg = {
+                    "type": "disconnect",
+                    "cp_id": CP_ID
+                }
+                send_to_central(disconnect_msg)
+                sock_central.close()
+            except:
+                pass
+            break
+        
+        except Exception as e:
+            log_message(f'[MONITOR] Error en loop principal: {e}')
+            registered = False
+            if sock_central:
+                sock_central.close()
+                sock_central = None
+        
+        time.sleep(1)  # Check cada segundo según especificación
 
-    time.sleep(1)
+if __name__ == '__main__':
+    log_message(f'[MONITOR] Iniciando Monitor para CP: {CP_ID}')
+    log_message(f'[MONITOR] Engine: {ENGINE_HOST}:{ENGINE_MONITOR_PORT}')
+    log_message(f'[MONITOR] Central: {CENTRAL_HOST}:{CENTRAL_PORT}')
+    
+    monitoring_loop()
