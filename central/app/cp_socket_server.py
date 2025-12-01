@@ -20,10 +20,11 @@ class CPSocketServer:
         self.host = host
         self.port = port
         self.producer = producer
-        self.socketio = socketio  # ✅ NUEVO: Para notificaciones en tiempo real
+        self.socketio = socketio
         self._sock = None
         self._clients = {}  # cp_id -> (conn,addr)
         self._stop_flag = threading.Event()
+        self._clients_lock = threading.Lock()  # ✅ Lock para thread-safe
 
     def start(self):
         t = threading.Thread(target=self._serve_forever, daemon=True)
@@ -47,6 +48,33 @@ class CPSocketServer:
                 }, namespace='/')
             except Exception as e:
                 print(f"[CP SOCKET] Error enviando notificación web: {e}")
+
+    # ✅ NUEVO: Método para enviar comandos a un CP específico
+    def send_command_to_cp(self, cp_id, command):
+        """
+        Envía un comando a un CP específico.
+        command = {"type": "command", "action": "stop"} o {"action": "resume"}
+        Returns: True si se envió correctamente, False si no
+        """
+        with self._clients_lock:
+            if cp_id not in self._clients:
+                print(f"[CP SOCKET] ⚠️  CP {cp_id} no está conectado, no se puede enviar comando")
+                return False
+            
+            conn, addr = self._clients[cp_id]
+        
+        try:
+            msg = json.dumps(command) + "\n"
+            conn.sendall(msg.encode('utf-8'))
+            print(f"[CP SOCKET] ✅ Comando enviado a {cp_id}: {command}")
+            return True
+        except Exception as e:
+            print(f"[CP SOCKET] ❌ Error enviando comando a {cp_id}: {e}")
+            # Si falla, quitar de la lista de clientes
+            with self._clients_lock:
+                if cp_id in self._clients:
+                    del self._clients[cp_id]
+            return False
 
     def _serve_forever(self):
         print(f"[CP SOCKET] 🔌 Iniciando servidor en {self.host}:{self.port}")
@@ -114,7 +142,8 @@ class CPSocketServer:
                         print(f"[CP SOCKET] ✅ CP registrado: {cp_id} @ {location} desde {addr}")
                         
                         # Guardar cliente
-                        self._clients[cp_id] = (conn, addr)
+                        with self._clients_lock:
+                            self._clients[cp_id] = (conn, addr)
                         
                         # Notificar al panel web
                         self._notify_web(f"CP {cp_id} registrado y ACTIVADO", 'success')
@@ -186,6 +215,13 @@ class CPSocketServer:
                         
                         break
                     
+                    # ✅ NUEVO: Respuesta a comando (ACK del CP)
+                    elif mtype == "command_ack":
+                        cp_id = obj.get("cp_id")
+                        action = obj.get("action")
+                        status = obj.get("status")
+                        print(f"[CP SOCKET] 📨 ACK de {cp_id}: {action} -> {status}")
+                    
                     else:
                         # Mensaje desconocido - ignorar
                         pass
@@ -203,8 +239,9 @@ class CPSocketServer:
                 except:
                     pass
                 
-                if cp_id in self._clients:
-                    del self._clients[cp_id]
+                with self._clients_lock:
+                    if cp_id in self._clients:
+                        del self._clients[cp_id]
             
             try:
                 conn.close()

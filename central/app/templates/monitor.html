@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>EVCharging - Panel de Monitorización</title>
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous"></script>
     <style>
         * {
             margin: 0;
@@ -341,27 +341,41 @@
     </div>
 
     <script>
+        // Debug: Configurar Socket.IO con logs
+        console.log('[DEBUG] Iniciando conexión WebSocket...');
+        
         // Conectar al WebSocket
-        const socket = io();
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionAttempts: 5
+        });
 
         socket.on('connect', () => {
-            console.log('WebSocket conectado');
+            console.log('[DEBUG] WebSocket conectado - ID:', socket.id);
             document.getElementById('connection-status').className = 'connection-status connected';
             document.getElementById('connection-status').innerHTML = '🟢 Conectado';
             socket.emit('request_state');
         });
 
         socket.on('disconnect', () => {
-            console.log('WebSocket desconectado');
+            console.log('[DEBUG] WebSocket desconectado');
             document.getElementById('connection-status').className = 'connection-status disconnected';
             document.getElementById('connection-status').innerHTML = '🔴 Desconectado';
         });
 
+        socket.on('connect_error', (error) => {
+            console.error('[DEBUG] Error de conexión:', error);
+        });
+
         socket.on('update_cps', (data) => {
+            console.log('[DEBUG] Datos recibidos:', data);
             updateCPGrid(data.charging_points);
         });
 
         socket.on('notification', (data) => {
+            console.log('[DEBUG] Notificación recibida:', data);
             showNotification(data.message, data.type);
         });
 

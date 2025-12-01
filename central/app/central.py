@@ -6,13 +6,13 @@ from flask_socketio import SocketIO, emit
 
 from .cp_socket_server import CPSocketServer
 from .kafka_producer import KafkaCentralProducer
+from .kafka_consumer import KafkaCentralConsumer  # ✅ NUEVO
 from .data_manager import load_data, save_data, get_all_cps, get_cp, update_cp
 
 # Crear aplicación Flask con SocketIO
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'evcharging_secret_2025'
 
-# ✅ CORREGIDO: Usar eventlet como async_mode y configurar CORS
 socketio = SocketIO(
     app, 
     cors_allowed_origins="*", 
@@ -21,8 +21,9 @@ socketio = SocketIO(
     engineio_logger=False
 )
 
-# Variable global para el producer (se inicializa en main)
+# Variable global para el producer y consumer
 kafka_producer = None
+kafka_consumer = None  # ✅ NUEVO
 
 # ==================== RUTAS WEB ====================
 
@@ -60,22 +61,44 @@ def api_cp_command(cp_id):
     if not cp:
         return jsonify({"error": "CP not found"}), 404
 
+    # ✅ Enviar comando al CP real
+    command_sent = False
+    if hasattr(app, 'cp_server'):
+        command = {
+            "type": "command",
+            "action": action,
+            "cp_id": cp_id
+        }
+        command_sent = app.cp_server.send_command_to_cp(cp_id, command)
+    
+    # Actualizar estado en BD
     if action == "stop":
         update_cp(cp_id, state="PARADO")
+        msg = f'CP {cp_id} ha sido PARADO'
+        if not command_sent:
+            msg += ' (CP no conectado - comando no enviado)'
         socketio.emit('notification', {
-            'type': 'info',
-            'message': f'CP {cp_id} ha sido PARADO'
+            'type': 'warning' if not command_sent else 'info',
+            'message': msg
         }, namespace='/')
         print(f"[CENTRAL] CP {cp_id} PARADO por comando administrativo")
     else:
         update_cp(cp_id, state="ACTIVADO")
+        msg = f'CP {cp_id} ha sido REANUDADO'
+        if not command_sent:
+            msg += ' (CP no conectado - comando no enviado)'
         socketio.emit('notification', {
-            'type': 'success',
-            'message': f'CP {cp_id} ha sido REANUDADO'
+            'type': 'warning' if not command_sent else 'success',
+            'message': msg
         }, namespace='/')
         print(f"[CENTRAL] CP {cp_id} REANUDADO por comando administrativo")
     
-    return jsonify({"status": "ok", "cp_id": cp_id, "action": action})
+    return jsonify({
+        "status": "ok", 
+        "cp_id": cp_id, 
+        "action": action,
+        "command_sent": command_sent
+    })
 
 # ==================== WEBSOCKET HANDLERS ====================
 
@@ -130,7 +153,7 @@ def periodic_monitor_publish(producer, interval=5):
 # ==================== FUNCIÓN PRINCIPAL ====================
 
 def main():
-    global kafka_producer
+    global kafka_producer, kafka_consumer
     
     # Configuración vía variables de entorno
     kafka_host = os.environ.get("KAFKA_HOST", "kafka")
@@ -149,14 +172,20 @@ def main():
     # Inicializar Kafka Producer
     kafka_producer = KafkaCentralProducer()
     
+    # ✅ NUEVO: Inicializar Kafka Consumer
+    kafka_consumer = KafkaCentralConsumer(socketio=socketio)
+    kafka_consumer.start()
+    print("[CENTRAL] ✅ Kafka Consumer iniciado")
+    
     # Iniciar servidor de sockets para CPs
     cp_server = CPSocketServer(
         host="0.0.0.0", 
         port=cp_port, 
         producer=kafka_producer,
-        socketio=socketio  # Pasar socketio para notificaciones en tiempo real
+        socketio=socketio
     )
     cp_server.start()
+    app.cp_server = cp_server  # ✅ Guardar referencia
     print(f"[CENTRAL] ✅ Socket server iniciado en puerto {cp_port}")
     
     # Iniciar thread de broadcast WebSocket
@@ -179,20 +208,19 @@ def main():
     print("="*60)
     
     try:
-        # ✅ CORREGIDO: Añadir allow_unsafe_werkzeug=True para desarrollo
-        # En producción real se debería usar gunicorn o similar
         socketio.run(
             app, 
             host="0.0.0.0", 
             port=api_port, 
             debug=False, 
             use_reloader=False,
-            allow_unsafe_werkzeug=True  # ✅ AÑADIDO
+            allow_unsafe_werkzeug=True
         )
     except KeyboardInterrupt:
         print("\n[CENTRAL] ⚠️  Señal de interrupción recibida")
         print("[CENTRAL] 🛑 Cerrando servidor...")
         cp_server.stop()
+        kafka_consumer.stop()  # ✅ NUEVO
         kafka_producer.flush()
         print("[CENTRAL] ✅ Central finalizada correctamente")
 

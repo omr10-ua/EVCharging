@@ -109,6 +109,7 @@ def monitoring_loop():
     global sock_central, registered
     
     last_status = "OK"
+    forced_stop = False  # ✅ Flag para comandos de parar
     
     while True:
         try:
@@ -118,6 +119,37 @@ def monitoring_loop():
                 if not connect_to_central():
                     time.sleep(5)
                     continue
+            
+            # ✅ NUEVO: Verificar si hay comandos de Central (non-blocking)
+            try:
+                sock_central.settimeout(0.1)  # timeout corto para no bloquear
+                data = sock_central.recv(4096)
+                if data:
+                    try:
+                        msg = json.loads(data.decode('utf-8').strip())
+                        if msg.get("type") == "command":
+                            action = msg.get("action")
+                            if action == "stop":
+                                forced_stop = True
+                                log_message('[MONITOR] 🛑 Comando PARAR recibido de CENTRAL')
+                                # Enviar ACK
+                                ack = {"type": "command_ack", "cp_id": CP_ID, "action": "stop", "status": "ok"}
+                                sock_central.sendall((json.dumps(ack) + "\n").encode('utf-8'))
+                            elif action == "resume":
+                                forced_stop = False
+                                log_message('[MONITOR] ▶️  Comando REANUDAR recibido de CENTRAL')
+                                # Enviar ACK
+                                ack = {"type": "command_ack", "cp_id": CP_ID, "action": "resume", "status": "ok"}
+                                sock_central.sendall((json.dumps(ack) + "\n").encode('utf-8'))
+                    except json.JSONDecodeError:
+                        pass
+            except socket.timeout:
+                pass  # No hay datos, continuar
+            
+            # Si está forzado a parar, no hacer health checks, reportar como PARADO
+            if forced_stop:
+                time.sleep(1)
+                continue
             
             # Comprobar salud del Engine
             engine_status = check_engine_health()
