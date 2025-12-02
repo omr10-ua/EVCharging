@@ -229,6 +229,92 @@ class CPSocketServer:
                         update_cp(cp_id, state=new_state)
                         print(f"[CP SOCKET] 🔄 Estado confirmado de {cp_id}: {new_state}")
                     
+                    # ✅ NUEVO: Solicitud de servicio de un Driver
+                    elif mtype == "service_request":
+                        driver_id = obj.get("driver_id")
+                        requested_cp_id = obj.get("cp_id")
+                        
+                        print(f"[CP SOCKET] 📞 Solicitud de servicio: Driver {driver_id} → CP {requested_cp_id}")
+                        
+                        # Validar que el CP existe y está disponible
+                        from .data_manager import get_cp
+                        target_cp = get_cp(requested_cp_id)
+                        
+                        response = {"type": "service_response"}
+                        
+                        if not target_cp:
+                            response["status"] = "denied"
+                            response["reason"] = "CP no existe"
+                            print(f"[CP SOCKET] ❌ CP {requested_cp_id} no existe")
+                        
+                        elif target_cp.get("state") != "ACTIVADO":
+                            response["status"] = "denied"
+                            response["reason"] = f"CP en estado {target_cp.get('state')}"
+                            print(f"[CP SOCKET] ❌ CP {requested_cp_id} no disponible: {target_cp.get('state')}")
+                        
+                        elif target_cp.get("current_driver"):
+                            response["status"] = "denied"
+                            response["reason"] = f"CP ocupado por {target_cp.get('current_driver')}"
+                            print(f"[CP SOCKET] ❌ CP {requested_cp_id} ocupado")
+                        
+                        else:
+                            # Autorizar servicio
+                            response["status"] = "authorized"
+                            response["cp_id"] = requested_cp_id
+                            
+                            # Actualizar BD con el driver
+                            update_cp(requested_cp_id, 
+                                    state="SUMINISTRANDO",
+                                    current_driver=driver_id)
+                            
+                            # Enviar comando al CP para iniciar suministro
+                            start_command = {
+                                "type": "start_supply",
+                                "driver_id": driver_id
+                            }
+                            self.send_command_to_cp(requested_cp_id, start_command)
+                            
+                            print(f"[CP SOCKET] ✅ Servicio autorizado: {driver_id} en {requested_cp_id}")
+                            
+                            # Notificar al panel web
+                            self._notify_web(f"Servicio iniciado: {driver_id} en {requested_cp_id}", 'success')
+                        
+                        # Enviar respuesta al driver
+                        try:
+                            conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
+                        except:
+                            pass
+                    
+                    # ✅ NUEVO: Cancelación de servicio por Driver
+                    elif mtype == "cancel_service":
+                        driver_id = obj.get("driver_id")
+                        cancel_cp_id = obj.get("cp_id")
+                        
+                        print(f"[CP SOCKET] 🛑 Cancelación de servicio: Driver {driver_id} en CP {cancel_cp_id}")
+                        
+                        # Obtener CP
+                        from .data_manager import get_cp
+                        target_cp = get_cp(cancel_cp_id)
+                        
+                        if target_cp and target_cp.get("current_driver") == driver_id:
+                            # Enviar comando de stop al CP
+                            stop_command = {
+                                "type": "stop_supply",
+                                "reason": "driver_disconnected"
+                            }
+                            self.send_command_to_cp(cancel_cp_id, stop_command)
+                            
+                            # Actualizar BD
+                            update_cp(cancel_cp_id,
+                                    state="ACTIVADO",
+                                    current_driver=None,
+                                    current_kw=0.0,
+                                    total_kwh=0.0,
+                                    current_euros=0.0)
+                            
+                            print(f"[CP SOCKET] ✅ Suministro cancelado en {cancel_cp_id}")
+                            self._notify_web(f"Driver {driver_id} desconectado - Suministro cancelado en {cancel_cp_id}", 'warning')
+                    
                     else:
                         # Mensaje desconocido - ignorar
                         pass

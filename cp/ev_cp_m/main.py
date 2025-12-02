@@ -104,6 +104,23 @@ def check_engine_health():
         log_message(f'[MONITOR] ⚠️  No se pudo conectar con Engine: {e}')
         return "DISCONNECTED"
 
+def send_command_to_engine(command):
+    """Envía un comando JSON al Engine (para start_supply, etc.)"""
+    try:
+        sock_engine = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock_engine.settimeout(5)
+        sock_engine.connect((ENGINE_HOST, ENGINE_MONITOR_PORT))
+        
+        message = json.dumps(command) + "\n"
+        sock_engine.sendall(message.encode('utf-8'))
+        
+        sock_engine.close()
+        return True
+        
+    except Exception as e:
+        log_message(f'[MONITOR] ❌ Error enviando comando al Engine: {e}')
+        return False
+
 def monitoring_loop():
     """Loop principal de monitorización"""
     global sock_central, registered
@@ -127,13 +144,15 @@ def monitoring_loop():
                 if data:
                     try:
                         msg = json.loads(data.decode('utf-8').strip())
-                        if msg.get("type") == "command":
+                        msg_type = msg.get("type")
+                        
+                        if msg_type == "command":
                             action = msg.get("action")
                             if action == "stop":
                                 forced_stop = True
                                 log_message('[MONITOR] 🛑 Comando PARAR recibido de CENTRAL')
                                 
-                                # ✅ Notificar estado PARADO a Central
+                                # Notificar estado PARADO a Central
                                 status_msg = {
                                     "type": "status_change",
                                     "cp_id": CP_ID,
@@ -149,7 +168,7 @@ def monitoring_loop():
                                 forced_stop = False
                                 log_message('[MONITOR] ▶️  Comando REANUDAR recibido de CENTRAL')
                                 
-                                # ✅ Notificar estado ACTIVADO a Central
+                                # Notificar estado ACTIVADO a Central
                                 status_msg = {
                                     "type": "status_change",
                                     "cp_id": CP_ID,
@@ -160,6 +179,43 @@ def monitoring_loop():
                                 # Enviar ACK
                                 ack = {"type": "command_ack", "cp_id": CP_ID, "action": "resume", "status": "ok"}
                                 sock_central.sendall((json.dumps(ack) + "\n").encode('utf-8'))
+                        
+                        # ✅ NUEVO: Comando start_supply de Central
+                        elif msg_type == "start_supply":
+                            driver_id = msg.get("driver_id")
+                            log_message(f'[MONITOR] 🚗 Comando START_SUPPLY recibido para driver {driver_id}')
+                            
+                            # Reenviar comando al Engine
+                            engine_command = {
+                                "type": "start_supply",
+                                "driver_id": driver_id,
+                                "cp_id": CP_ID
+                            }
+                            
+                            if send_command_to_engine(engine_command):
+                                log_message(f'[MONITOR] ✅ Comando reenviado al Engine')
+                                # Enviar ACK a Central
+                                ack = {"type": "command_ack", "cp_id": CP_ID, "action": "start_supply", "status": "ok"}
+                                sock_central.sendall((json.dumps(ack) + "\n").encode('utf-8'))
+                            else:
+                                log_message(f'[MONITOR] ❌ Error reenviando comando al Engine')
+                        
+                        # ✅ NUEVO: Comando stop_supply de Central (por cancelación de driver)
+                        elif msg_type == "stop_supply":
+                            reason = msg.get("reason", "unknown")
+                            log_message(f'[MONITOR] 🛑 Comando STOP_SUPPLY recibido (razón: {reason})')
+                            
+                            # Reenviar comando al Engine
+                            engine_command = {
+                                "type": "stop_supply",
+                                "reason": reason
+                            }
+                            
+                            if send_command_to_engine(engine_command):
+                                log_message(f'[MONITOR] ✅ Comando STOP reenviado al Engine')
+                            else:
+                                log_message(f'[MONITOR] ❌ Error reenviando comando STOP al Engine')
+                                
                     except json.JSONDecodeError:
                         pass
             except socket.timeout:

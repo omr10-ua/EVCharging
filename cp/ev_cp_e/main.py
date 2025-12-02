@@ -79,15 +79,84 @@ def monitor_server():
 
 
 def handle_monitor_conn(conn):
-    """Maneja conexión del Monitor (health check)"""
-    global status_flag
+    """Maneja conexión del Monitor (health check y comandos)"""
+    global status_flag, supplying, current_driver
     try:
-        data = conn.recv(1024).decode().strip()
+        data = conn.recv(4096).decode().strip()
+        
+        # Health check simple
         if data == 'HEALTH_CHECK':
             response = status_flag  # OK o KO
             conn.sendall(response.encode())
+        
+        # Comando JSON (start_supply, etc.)
+        else:
+            try:
+                command = json.loads(data)
+                command_type = command.get('type')
+                
+                if command_type == 'start_supply':
+                    driver_id = command.get('driver_id')
+                    log_message(f'[ENGINE] 🚗 Comando START_SUPPLY recibido para driver {driver_id}')
+                    
+                    if not supplying:
+                        current_driver = driver_id
+                        supplying = True
+                        log_message(f'[ENGINE] 🔌 Suministro iniciado para conductor {current_driver}')
+                        
+                        # Enviar mensaje de inicio a Kafka
+                        if producer:
+                            start_msg = {
+                                'type': 'supply_start',
+                                'cp_id': CP_ID,
+                                'driver_id': current_driver,
+                                'timestamp': time.time()
+                            }
+                            producer.send(KAFKA_TOPIC_TELEMETRY, start_msg)
+                        
+                        # Enviar confirmación al Monitor
+                        ack = {"type": "ack", "status": "ok"}
+                        conn.sendall((json.dumps(ack) + "\n").encode())
+                    else:
+                        log_message(f'[ENGINE] ⚠️  Ya hay un suministro en curso')
+                        nack = {"type": "ack", "status": "busy"}
+                        conn.sendall((json.dumps(nack) + "\n").encode())
+                
+                elif command_type == 'stop_supply':
+                    reason = command.get('reason', 'unknown')
+                    log_message(f'[ENGINE] 🛑 Comando STOP_SUPPLY recibido (razón: {reason})')
+                    
+                    if supplying:
+                        final_kwh = total_kwh
+                        final_euros = total_kwh * CP_PRICE
+                        final_driver = current_driver
+                        
+                        supplying = False
+                        log_message(f'[ENGINE] 🔋 Suministro cancelado. Total: {final_kwh:.2f} kWh (€{final_euros:.2f})')
+                        
+                        # Enviar mensaje de fin a Kafka
+                        if producer:
+                            end_msg = {
+                                'type': 'supply_end',
+                                'cp_id': CP_ID,
+                                'driver_id': final_driver,
+                                'total_kwh': round(final_kwh, 3),
+                                'total_euros': round(final_euros, 2),
+                                'reason': reason,
+                                'timestamp': time.time()
+                            }
+                            producer.send(KAFKA_TOPIC_TELEMETRY, end_msg)
+                        
+                        current_driver = None
+                    else:
+                        log_message(f'[ENGINE] ⚠️  No hay suministro activo para cancelar')
+                        
+            except json.JSONDecodeError:
+                # No es JSON, ignorar
+                pass
+                
     except Exception as e:
-        log_message(f'[ENGINE] Error en health check: {e}')
+        log_message(f'[ENGINE] Error en handle_monitor_conn: {e}')
     finally:
         conn.close()
 
@@ -120,13 +189,41 @@ def keyboard_listener():
                     current_driver = f"DRV{int(time.time()) % 10000}"
                     supplying = True
                     log_message(f'[ENGINE] 🔌 Suministro iniciado para conductor {current_driver}')
+                    
+                    # Enviar mensaje de inicio a Kafka
+                    if producer:
+                        start_msg = {
+                            'type': 'supply_start',
+                            'cp_id': CP_ID,
+                            'driver_id': current_driver,
+                            'timestamp': time.time()
+                        }
+                        producer.send(KAFKA_TOPIC_TELEMETRY, start_msg)
                 else:
                     log_message('[ENGINE] ⚠️  Ya hay un suministro en curso')
                     
             elif key == 'u':
                 if supplying:
+                    final_kwh = total_kwh
+                    final_euros = total_kwh * CP_PRICE
+                    final_driver = current_driver
+                    
                     supplying = False
-                    log_message(f'[ENGINE] 🔋 Suministro finalizado. Total: {total_kwh:.2f} kWh (€{total_kwh * CP_PRICE:.2f})')
+                    log_message(f'[ENGINE] 🔋 Suministro finalizado. Total: {final_kwh:.2f} kWh (€{final_euros:.2f})')
+                    
+                    # Enviar mensaje de fin a Kafka
+                    if producer:
+                        end_msg = {
+                            'type': 'supply_end',
+                            'cp_id': CP_ID,
+                            'driver_id': final_driver,
+                            'total_kwh': round(final_kwh, 3),
+                            'total_euros': round(final_euros, 2),
+                            'reason': 'completed',
+                            'timestamp': time.time()
+                        }
+                        producer.send(KAFKA_TOPIC_TELEMETRY, end_msg)
+                    
                     current_driver = None
                 else:
                     log_message('[ENGINE] ⚠️  No hay suministro activo')
