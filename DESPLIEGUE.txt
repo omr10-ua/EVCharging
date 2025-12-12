@@ -14,11 +14,11 @@ MONITORES:
 
 # 2. Instalar dependencias Monitor
 cd ../ev_cp_m
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt (En Linux/Mac tendrás que hacerlo con pip3 o python3)
 
 # 1. Instalar dependencias Engine
 cd cp/ev_cp_e
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt (En Linux/Mac tendrás que hacerlo con pip3 o python3)
 
 [WINDOWS]
 
@@ -44,7 +44,7 @@ export CENTRAL_PORT="5001"
 export ENGINE_HOST="localhost"
 export ENGINE_PORT="9101"
 export ENGINE_MONITOR_PORT="6060"	
-python main.py
+python3 main.py
 
 ENGINES:
 
@@ -68,13 +68,13 @@ export KAFKA_BROKER="localhost:29092"	//Se cambia por la IP del PC que esté Cen
 export HEALTH_CHECK_PORT="9101"		//9201, 9301, 9401...
 export KEY_RECEIVE_PORT="9102"		//9202, 9302, 9402...
 export MONITOR_PORT="6060"		//6061, 6062, 6063...
-python main.py
+python3 main.py
 
 DRIVERS:
 
 # 1. Instalar dependencias
 cd driver
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt (En Linux/Mac tendrás que hacerlo con pip3 o python3)
 
 (Antes de iniciar, tener Python instalado y ejecutar el comando para instalar las librerías necesarias)
 
@@ -88,12 +88,12 @@ python ev_driver.py
 
 export DRIVER_ID="DRV001"
 export KAFKA_BROKER="localhost:29092"	//Cambiar por IP de donde esté central.
-python ev_driver.py
+python3 ev_driver.py
 
 CUANDO PASE EL PROFESOR INICIAMOS EL WEATHER (PARA AHORRAR CONSULTAS A LA API)
 
 cd weather
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt (En Linux/Mac tendrás que hacerlo con pip3 o python3)
 
 [WINDOWS]
 
@@ -103,7 +103,9 @@ python ev_w.py
 
 [LINUX/MAC]
 
+export CENTRAL_API_URL="http://localhost:8000/api/charging_points"  //cambiar si es fuera del pc de central
 export OPENWEATHER_API_KEY="f1dea33fe22bf6866d46ec98323cc7cd"
-python ev_w.py
+python3 ev_w.py
+
 
 
