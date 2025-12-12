@@ -1,454 +1,405 @@
 #!/usr/bin/env python3
 """
-EV_Driver - Aplicación del Conductor
-Permite solicitar servicios de recarga en puntos de carga
+EV_Driver - Aplicación del conductor (MEJORADA)
+Funciones:
+- Solicita suministro en un CP específico
+- Muestra telemetría en TIEMPO REAL durante el suministro
+- Muestra ticket final al completar
+- Puede leer peticiones desde un archivo
+- Recibe updates vía Kafka de CENTRAL
 """
 
 import os
 import sys
-import socket
-import json
 import time
+import json
 import threading
-from datetime import datetime
-from kafka import KafkaConsumer
+import uuid
+from kafka import KafkaProducer, KafkaConsumer
 from kafka.errors import KafkaError
 
-# ==================== CONFIGURACIÓN ====================
+# Configuración
+DRIVER_ID = os.getenv('DRIVER_ID', 'DRV001')
+KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'localhost:9092')
 
-DRIVER_ID = os.environ.get('DRIVER_ID', 'DRV001')
-KAFKA_BROKER = os.environ.get('KAFKA_BROKER', 'localhost:29092')
-CENTRAL_HOST = os.environ.get('CENTRAL_HOST', 'localhost')
-CENTRAL_PORT = int(os.environ.get('CENTRAL_PORT', 5001))
-
-# ==================== ESTADO GLOBAL ====================
-
-current_service = {
-    'active': False,
-    'cp_id': None,
-    'start_time': None,
-    'total_kwh': 0.0,
-    'total_euros': 0.0,
-    'current_kw': 0.0
-}
-
-service_lock = threading.Lock()
-
-# ==================== UTILIDADES ====================
-
-def log_message(msg):
-    """Imprime mensaje con timestamp"""
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{timestamp}] {msg}")
-
-def clear_screen():
-    """Limpia la pantalla"""
-    os.system('cls' if os.name == 'nt' else 'clear')
-
-# ==================== COMUNICACIÓN CON CENTRAL ====================
-
-def request_service(cp_id):
-    """
-    Solicita un servicio de recarga a Central
-    Returns: (success: bool, message: str)
-    """
-    try:
-        log_message(f'[DRIVER] Solicitando servicio en {cp_id}...')
+class EVDriver:
+    def __init__(self, driver_id, kafka_broker):
+        self.driver_id = driver_id
+        self.kafka_broker = kafka_broker
+        self.producer = None
+        self.consumer_updates = None  # Consumer para driver_updates
+        self.consumer_telemetry = None  # Consumer para cp_telemetry
+        self.running = True
+        self.pending_requests = []
+        self.current_cp = None
+        self.current_price = 0.0
+        self.supply_start_time = None
         
-        # Conectar a Central
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)
-        sock.connect((CENTRAL_HOST, CENTRAL_PORT))
+    def log(self, msg):
+        """Logging con timestamp"""
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        print(f'[{timestamp}] [DRIVER-{self.driver_id}] {msg}')
+    
+    def init_kafka(self):
+        """Inicializa Kafka"""
+        try:
+            self.log(f"Conectando a Kafka en {self.kafka_broker}...")
+            
+            # Producer para enviar peticiones
+            self.producer = KafkaProducer(
+                bootstrap_servers=self.kafka_broker,
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                retries=5
+            )
+            
+            # Consumer para recibir respuestas de CENTRAL (autorizaciones/denegaciones)
+            self.consumer_updates = KafkaConsumer(
+                'driver_updates',
+                bootstrap_servers=self.kafka_broker,
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                group_id=f'driver_{self.driver_id}_updates',
+                auto_offset_reset='latest',
+                enable_auto_commit=True,
+                consumer_timeout_ms=1000
+            )
+            
+            # Consumer para recibir telemetría de CPs (suministro en tiempo real)
+            # IMPORTANTE: Usamos group_id aleatorio para siempre leer mensajes recientes
+            self.consumer_telemetry = KafkaConsumer(
+                'cp_telemetry',
+                bootstrap_servers=self.kafka_broker,
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                group_id=f'driver_{self.driver_id}_telemetry_{uuid.uuid4().hex[:8]}',
+                auto_offset_reset='latest',
+                enable_auto_commit=False,  # No guardar offset
+                consumer_timeout_ms=1000
+            )
+            
+            self.log("✓ Kafka inicializado")
+            self.log("✓ Escuchando: driver_updates, cp_telemetry")
+            return True
+            
+        except Exception as e:
+            self.log(f"✗ Error inicializando Kafka: {e}")
+            return False
+    
+    def request_charging(self, cp_id):
+        """Solicita un suministro en un CP"""
+        self.log(f"Solicitando suministro en CP {cp_id}...")
         
-        # Enviar solicitud
         request = {
-            "type": "service_request",
-            "driver_id": DRIVER_ID,
-            "cp_id": cp_id
+            "type": "request_charging",
+            "driver_id": self.driver_id,
+            "cp_id": cp_id,
+            "timestamp": time.time()
         }
         
-        message = json.dumps(request) + "\n"
-        sock.sendall(message.encode('utf-8'))
-        
-        # Esperar respuesta
-        response_data = sock.recv(4096)
-        response = json.loads(response_data.decode('utf-8').strip())
-        
-        sock.close()
-        
-        if response.get('status') == 'authorized':
-            log_message(f'[DRIVER] ✅ Servicio AUTORIZADO en {cp_id}')
-            return True, "Autorizado"
-        else:
-            reason = response.get('reason', 'Motivo desconocido')
-            log_message(f'[DRIVER] ❌ Servicio DENEGADO: {reason}')
-            return False, reason
-            
-    except socket.timeout:
-        log_message('[DRIVER] ❌ Timeout conectando con Central')
-        return False, "Timeout"
-    except Exception as e:
-        log_message(f'[DRIVER] ❌ Error solicitando servicio: {e}')
-        return False, str(e)
-
-# ==================== KAFKA CONSUMER ====================
-
-def kafka_consumer_loop():
-    """
-    Thread que escucha notificaciones de Kafka sobre el suministro
-    """
-    log_message('[KAFKA] Conectando a Kafka...')
+        try:
+            self.producer.send('driver_requests', request)
+            self.producer.flush()
+            self.log(f"✓ Petición enviada para CP {cp_id}")
+            return True
+        except Exception as e:
+            self.log(f"✗ Error enviando petición: {e}")
+            return False
     
-    try:
-        consumer = KafkaConsumer(
-            'cp_telemetry',
-            bootstrap_servers=KAFKA_BROKER,
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            auto_offset_reset='latest',
-            enable_auto_commit=True,
-            group_id=f'driver_{DRIVER_ID}'
-        )
+    def consumer_updates_loop(self):
+        """Loop que consume respuestas de autorización/denegación"""
+        self.log("Iniciando consumer updates loop...")
         
-        log_message('[KAFKA] ✅ Conectado a Kafka')
-        
-        for message in consumer:
-            try:
-                data = message.value
-                msg_type = data.get('type')
-                msg_driver_id = data.get('driver_id')
+        try:
+            while self.running:
+                messages = self.consumer_updates.poll(timeout_ms=1000)
                 
-                # Solo procesar mensajes para este driver
-                if msg_driver_id != DRIVER_ID:
+                for topic_partition, records in messages.items():
+                    for record in records:
+                        if not self.running:
+                            break
+                        
+                        try:
+                            data = record.value
+                            driver_id = data.get('driver_id')
+                            
+                            if driver_id != self.driver_id:
+                                continue  # No es para nosotros
+                            
+                            payload = data.get('payload', {})
+                            msg_type = payload.get('type')
+                            
+                            if msg_type == 'charging_authorized':
+                                cp_id = payload.get('cp_id')
+                                price = payload.get('price', 0.0)
+                                self.current_cp = cp_id
+                                self.current_price = price
+                                self.supply_start_time = time.time()
+                                
+                                print()  # Nueva línea
+                                self.log("="*60)
+                                self.log("✅ SUMINISTRO AUTORIZADO")
+                                self.log(f"   CP: {cp_id}")
+                                self.log(f"   Precio: €{price:.2f}/kWh")
+                                self.log("   🔌 Conecte su vehículo al punto de recarga")
+                                self.log("="*60)
+                                print()
+                            
+                            elif msg_type == 'charging_denied':
+                                cp_id = payload.get('cp_id')
+                                reason = payload.get('reason', 'Desconocido')
+                                print()  # Nueva línea
+                                self.log("="*60)
+                                self.log("❌ SUMINISTRO DENEGADO")
+                                self.log(f"   CP: {cp_id}")
+                                self.log(f"   Razón: {reason}")
+                                self.log("="*60)
+                                print()
+                                self.current_cp = None
+                        
+                        except Exception as e:
+                            self.log(f"Error procesando mensaje updates: {e}")
+        
+        except Exception as e:
+            self.log(f"Error en consumer updates loop: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def consumer_telemetry_loop(self):
+        """Loop que consume telemetría en tiempo real"""
+        self.log("Iniciando consumer telemetry loop...")
+        
+        last_print = 0
+        
+        try:
+            while self.running:
+                # Poll con timeout más corto para capturar mensajes más rápido
+                messages = self.consumer_telemetry.poll(timeout_ms=500)
+                
+                if not messages:
                     continue
                 
-                if msg_type == 'telemetry':
-                    process_telemetry(data)
-                elif msg_type == 'supply_start':
-                    process_supply_start(data)
-                elif msg_type == 'supply_end':
-                    process_supply_end(data)
-                    
-            except Exception as e:
-                log_message(f'[KAFKA] Error procesando mensaje: {e}')
-                
-    except Exception as e:
-        log_message(f'[KAFKA] ❌ Error en consumer: {e}')
-
-def process_supply_start(data):
-    """Procesa inicio de suministro"""
-    with service_lock:
-        current_service['active'] = True
-        current_service['cp_id'] = data.get('cp_id')
-        current_service['start_time'] = time.time()
-        current_service['total_kwh'] = 0.0
-        current_service['total_euros'] = 0.0
-        current_service['current_kw'] = 0.0
-    
-    log_message(f'[DRIVER] 🔋 Suministro INICIADO en {data.get("cp_id")}')
-
-def process_telemetry(data):
-    """Procesa telemetría en tiempo real"""
-    with service_lock:
-        if current_service['active']:
-            current_service['current_kw'] = data.get('consumption_kw', 0.0)
-            current_service['total_kwh'] = data.get('total_kwh', 0.0)
-            current_service['total_euros'] = data.get('total_kwh', 0.0) * data.get('current_price', 0.0)
-
-def process_supply_end(data):
-    """Procesa fin de suministro"""
-    reason = data.get('reason', 'completed')
-    total_kwh = data.get('total_kwh', 0.0)
-    total_euros = data.get('total_euros', 0.0)
-    cp_id = data.get('cp_id', 'UNKNOWN')
-    
-    elapsed_time = 0
-    with service_lock:
-        if current_service['start_time']:
-            elapsed_time = time.time() - current_service['start_time']
-        current_service['active'] = False
-        current_service['total_kwh'] = total_kwh
-        current_service['total_euros'] = total_euros
-    
-    # Calcular tiempo
-    minutes = int(elapsed_time // 60)
-    seconds = int(elapsed_time % 60)
-    
-    # Imprimir ticket
-    print("\n" + "="*60)
-    print("🧾 TICKET DE RECARGA")
-    print("="*60)
-    print(f"Conductor: {DRIVER_ID}")
-    print(f"Punto de recarga: {cp_id}")
-    print(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("-"*60)
-    
-    if reason == 'completed':
-        print("Estado: ✅ COMPLETADO")
-        log_message(f'[DRIVER] ✅ Suministro COMPLETADO')
-    elif reason == 'driver_disconnected':
-        print("Estado: 🛑 CANCELADO (Driver desconectado)")
-        log_message(f'[DRIVER] 🛑 Suministro CANCELADO por desconexión')
-    elif reason == 'fault':
-        print("Estado: ⚠️  INTERRUMPIDO (Avería)")
-        log_message(f'[DRIVER] ⚠️  Suministro INTERRUMPIDO por avería')
-    else:
-        print(f"Estado: ⚠️  FINALIZADO ({reason})")
-        log_message(f'[DRIVER] ⚠️  Suministro FINALIZADO: {reason}')
-    
-    print("-"*60)
-    print(f"⚡ Energía suministrada: {total_kwh:.2f} kWh")
-    print(f"💶 Importe total: €{total_euros:.2f}")
-    print(f"⏱️  Tiempo de recarga: {minutes:02d}:{seconds:02d}")
-    print("="*60)
-    print()
-
-# ==================== MODO INTERACTIVO ====================
-
-def show_menu():
-    """Muestra el menú principal"""
-    clear_screen()
-    print("="*60)
-    print("🚗 EV DRIVER - Sistema de Recarga")
-    print("="*60)
-    print(f"Conductor: {DRIVER_ID}")
-    print(f"Kafka: {KAFKA_BROKER}")
-    print(f"Central: {CENTRAL_HOST}:{CENTRAL_PORT}")
-    print("="*60)
-    print()
-    print("[1] Solicitar recarga en un CP")
-    print("[2] Cargar servicios desde archivo")
-    print("[3] Ver estado de mi recarga actual")
-    print("[4] Salir")
-    print()
-
-def interactive_mode():
-    """Modo interactivo"""
-    while True:
-        show_menu()
-        option = input("Selecciona una opción: ").strip()
+                for topic_partition, records in messages.items():
+                    for record in records:
+                        if not self.running:
+                            break
+                        
+                        try:
+                            data = record.value
+                            msg_type = data.get('type')
+                            cp_id = data.get('cp_id')
+                            driver_id = data.get('driver_id')
+                            
+                            # Solo procesar mensajes del CP donde estamos
+                            if cp_id != self.current_cp:
+                                continue
+                            
+                            # Solo procesar mensajes para nosotros (si tiene driver_id)
+                            if driver_id and driver_id != self.driver_id:
+                                continue
+                            
+                            if msg_type == 'supply_start':
+                                print()  # Nueva línea
+                                self.log("🔋 SUMINISTRO INICIADO - Esperando telemetría...")
+                                print()
+                            
+                            elif msg_type == 'telemetry':
+                                # Mostrar telemetría cada 2 segundos (no saturar pantalla)
+                                now = time.time()
+                                if now - last_print >= 2.0:
+                                    is_supplying = data.get('is_supplying', False)
+                                    if is_supplying:
+                                        kw = data.get('consumption_kw', 0.0)
+                                        kwh = data.get('total_kwh', 0.0)
+                                        price = data.get('current_price', self.current_price)
+                                        euros = kwh * price
+                                        
+                                        # Calcular tiempo transcurrido
+                                        if self.supply_start_time:
+                                            elapsed = int(now - self.supply_start_time)
+                                            mins = elapsed // 60
+                                            secs = elapsed % 60
+                                            time_str = f"{mins:02d}:{secs:02d}"
+                                        else:
+                                            time_str = "00:00"
+                                        
+                                        print(f"\r⚡ {kw:5.1f} kW | 🔋 {kwh:6.3f} kWh | 💶 €{euros:6.2f} | ⏱️  {time_str}", end='', flush=True)
+                                        last_print = now
+                            
+                            elif msg_type == 'supply_end':
+                                # TICKET FINAL
+                                total_kwh = data.get('total_kwh', 0.0)
+                                total_euros = data.get('total_euros', 0.0)
+                                reason = data.get('reason', 'completed')
+                                
+                                # Calcular duración
+                                if self.supply_start_time:
+                                    duration = int(time.time() - self.supply_start_time)
+                                    mins = duration // 60
+                                    secs = duration % 60
+                                else:
+                                    mins, secs = 0, 0
+                                
+                                # Imprimir ticket
+                                print("\n\n")  # Dos nuevas líneas después de telemetría
+                                print("="*60)
+                                print("🧾 TICKET DE RECARGA")
+                                print("="*60)
+                                print(f"Conductor:        {self.driver_id}")
+                                print(f"Punto de recarga: {cp_id}")
+                                print(f"Fecha:            {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                                print("-"*60)
+                                
+                                if reason == 'completed':
+                                    print("Estado:           ✅ COMPLETADO")
+                                elif reason == 'driver_disconnected':
+                                    print("Estado:           🛑 CANCELADO (Desconexión)")
+                                elif reason == 'fault':
+                                    print("Estado:           ⚠️  INTERRUMPIDO (Avería)")
+                                elif reason == 'admin':
+                                    print("Estado:           🛑 CANCELADO (Administrativo)")
+                                else:
+                                    print(f"Estado:           ⚠️  FINALIZADO ({reason})")
+                                
+                                print("-"*60)
+                                print(f"⚡ Energía:         {total_kwh:.3f} kWh")
+                                print(f"💶 Importe:         €{total_euros:.2f}")
+                                print(f"⏱️  Duración:        {mins:02d}:{secs:02d}")
+                                print("="*60)
+                                print()
+                                
+                                # Resetear estado
+                                self.current_cp = None
+                                self.current_price = 0.0
+                                self.supply_start_time = None
+                        
+                        except Exception as e:
+                            self.log(f"Error procesando telemetría: {e}")
         
-        if option == '1':
-            request_single_service()
-        elif option == '2':
-            request_services_from_file()
-        elif option == '3':
-            show_current_service()
-        elif option == '4':
-            log_message('[DRIVER] Saliendo...')
-            sys.exit(0)
-        else:
-            print("Opción inválida")
-            time.sleep(1)
-
-def request_single_service():
-    """Solicita un servicio manualmente"""
-    cp_id = input("\nIntroduce el ID del CP (ej: CP001): ").strip()
+        except Exception as e:
+            self.log(f"Error en consumer telemetry loop: {e}")
     
-    if not cp_id:
-        print("ID inválido")
-        time.sleep(2)
-        return
+    def load_requests_from_file(self, filename):
+        """Carga peticiones desde un archivo"""
+        try:
+            with open(filename, 'r') as f:
+                lines = [line.strip() for line in f if line.strip()]
+                self.pending_requests = lines
+                self.log(f"✓ Cargadas {len(lines)} peticiones desde {filename}")
+                return True
+        except Exception as e:
+            self.log(f"✗ Error cargando archivo: {e}")
+            return False
     
-    success, message = request_service(cp_id)
-    
-    if success:
-        print(f"\n✅ Servicio autorizado en {cp_id}")
-        print("Esperando inicio del suministro...")
-        print("(Presiona ENTER para volver al menú)")
+    def process_requests_from_file(self):
+        """Procesa las peticiones del archivo una a una"""
+        self.log(f"Procesando {len(self.pending_requests)} peticiones...")
         
-        # Esperar hasta que termine o usuario presione ENTER
-        wait_for_service_or_input()
-    else:
-        print(f"\n❌ Servicio denegado: {message}")
-        input("Presiona ENTER para continuar...")
-
-def show_current_service():
-    """Muestra el estado actual del servicio"""
-    with service_lock:
-        if not current_service['active']:
-            print("\n📭 No hay ningún servicio activo en este momento")
-            input("\nPresiona ENTER para continuar...")
-            return
-        
-        elapsed = time.time() - current_service['start_time']
-        minutes = int(elapsed // 60)
-        seconds = int(elapsed % 60)
-        
-        clear_screen()
-        print("="*60)
-        print("🔋 RECARGA EN PROGRESO")
-        print("="*60)
-        print(f"Conductor: {DRIVER_ID}")
-        print(f"Punto de recarga: {current_service['cp_id']}")
-        print("-"*60)
-        print(f"⚡ Potencia actual: {current_service['current_kw']:.1f} kW")
-        print(f"🔋 Energía total: {current_service['total_kwh']:.2f} kWh")
-        print(f"💶 Importe: €{current_service['total_euros']:.2f}")
-        print(f"⏱️  Tiempo: {minutes:02d}:{seconds:02d}")
-        print("="*60)
-        input("\nPresiona ENTER para volver al menú...")
-
-def wait_for_service_or_input():
-    """Espera a que termine el servicio o usuario presione ENTER"""
-    # TODO: Implementar espera con input no bloqueante
-    input()
-
-# ==================== MODO ARCHIVO ====================
-
-def request_services_from_file():
-    """Lee servicios de un archivo y los solicita secuencialmente"""
-    filename = input("\nIntroduce el nombre del archivo (ej: services.txt): ").strip()
-    
-    if not filename:
-        filename = "services.txt"
-    
-    try:
-        with open(filename, 'r') as f:
-            services = [line.strip() for line in f if line.strip()]
-        
-        if not services:
-            print("El archivo está vacío")
-            input("Presiona ENTER para continuar...")
-            return
-        
-        print(f"\n📄 Cargados {len(services)} servicios del archivo")
-        print("Iniciando proceso automático...\n")
-        
-        for idx, cp_id in enumerate(services, 1):
-            print(f"\n[{idx}/{len(services)}] Procesando {cp_id}...")
+        for cp_id in self.pending_requests:
+            if not self.running:
+                break
             
-            success, message = request_service(cp_id)
+            self.log(f"--- Petición para CP: {cp_id} ---")
+            self.request_charging(cp_id)
             
-            if success:
-                print(f"✅ Autorizado - Esperando completación...")
-                wait_for_service_completion()
-            else:
-                print(f"❌ Denegado: {message}")
-            
-            # Esperar 4 segundos antes del siguiente
-            if idx < len(services):
-                print("⏳ Esperando 4 segundos antes del siguiente servicio...")
-                time.sleep(4)
+            # Esperar 4 segundos antes de la siguiente
+            for i in range(4, 0, -1):
+                if not self.running:
+                    break
+                time.sleep(1)
         
-        print(f"\n✅ Todos los servicios procesados ({len(services)} total)")
-        input("\nPresiona ENTER para continuar...")
-        
-    except FileNotFoundError:
-        print(f"❌ Archivo '{filename}' no encontrado")
-        input("Presiona ENTER para continuar...")
-    except Exception as e:
-        print(f"❌ Error leyendo archivo: {e}")
-        input("Presiona ENTER para continuar...")
-
-def wait_for_service_completion():
-    """Espera a que el servicio actual complete"""
-    timeout = 300  # 5 minutos máximo
-    start = time.time()
+        self.log("Todas las peticiones procesadas")
     
-    while True:
-        with service_lock:
-            if not current_service['active'] and current_service['total_kwh'] > 0:
-                # Servicio completado
-                return
+    def interactive_mode(self):
+        """Modo interactivo por teclado"""
+        print()
+        self.log("="*60)
+        self.log("MODO INTERACTIVO:")
+        self.log("  r <CP_ID> = Solicitar suministro en CP")
+        self.log("  f <archivo> = Cargar y procesar peticiones desde archivo")
+        self.log("  s = Ver estado actual")
+        self.log("  q = Salir")
+        self.log("="*60)
+        print()
         
-        if time.time() - start > timeout:
-            print("⚠️  Timeout esperando completación")
-            return
-        
-        time.sleep(1)
-
-def cancel_current_service():
-    """Cancela el servicio actual si hay uno activo"""
-    with service_lock:
-        if current_service['active']:
-            cp_id = current_service['cp_id']
-            log_message(f'[DRIVER] Cancelando servicio en {cp_id}...')
-            
+        while self.running:
             try:
-                # Enviar cancelación a Central
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
-                sock.connect((CENTRAL_HOST, CENTRAL_PORT))
+                # Mostrar prompt
+                if self.current_cp:
+                    prompt = f"{self.driver_id} [🔋 {self.current_cp}]> "
+                else:
+                    prompt = f"{self.driver_id}> "
                 
-                cancel_msg = {
-                    "type": "cancel_service",
-                    "driver_id": DRIVER_ID,
-                    "cp_id": cp_id
-                }
+                cmd = input(prompt).strip()
                 
-                sock.sendall((json.dumps(cancel_msg) + "\n").encode('utf-8'))
-                sock.close()
+                if not cmd:
+                    continue
                 
-                log_message(f'[DRIVER] ✅ Servicio cancelado en {cp_id}')
+                parts = cmd.split()
+                action = parts[0].lower()
+                
+                if action == 'q':
+                    self.log("Saliendo...")
+                    self.running = False
+                    break
+                
+                elif action == 'r' and len(parts) >= 2:
+                    cp_id = parts[1]
+                    self.request_charging(cp_id)
+                
+                elif action == 'f' and len(parts) >= 2:
+                    filename = parts[1]
+                    if self.load_requests_from_file(filename):
+                        # Procesar en un hilo separado
+                        t = threading.Thread(target=self.process_requests_from_file, daemon=True)
+                        t.start()
+                
+                elif action == 's':
+                    if self.current_cp:
+                        self.log(f"📍 Suministrando en: {self.current_cp}")
+                        self.log(f"💶 Precio: €{self.current_price:.2f}/kWh")
+                    else:
+                        self.log("Sin suministro activo")
+                
+                else:
+                    self.log("Comando no reconocido")
+                
+            except EOFError:
+                self.log("\nEOF detectado, saliendo...")
+                self.running = False
+                break
+            except KeyboardInterrupt:
+                self.log("\nInterrupción detectada, saliendo...")
+                self.running = False
+                break
             except Exception as e:
-                log_message(f'[DRIVER] Error cancelando servicio: {e}')
-
-# ==================== MAIN ====================
-
-def main():
-    """Función principal"""
-    print("="*60)
-    print("🚗 EV_Driver - Iniciando...")
-    print("="*60)
-    print(f"Driver ID: {DRIVER_ID}")
-    print(f"Kafka Broker: {KAFKA_BROKER}")
-    print(f"Central: {CENTRAL_HOST}:{CENTRAL_PORT}")
-    print("="*60)
+                self.log(f"Error en interactive mode: {e}")
     
-    # Iniciar consumer de Kafka en thread separado
-    kafka_thread = threading.Thread(target=kafka_consumer_loop, daemon=True)
-    kafka_thread.start()
-    
-    time.sleep(2)  # Dar tiempo a que Kafka conecte
-    
-    # Verificar argumentos para modo archivo
-    if len(sys.argv) > 1 and '--services' in sys.argv:
-        idx = sys.argv.index('--services')
-        if idx + 1 < len(sys.argv):
-            filename = sys.argv[idx + 1]
-            print(f"\n📄 Modo automático con archivo: {filename}")
-            request_services_from_file_auto(filename)
+    def run(self):
+        """Ejecuta la aplicación"""
+        if not self.init_kafka():
+            self.log("Error inicializando Kafka, saliendo...")
             return
-    
-    # Modo interactivo
-    interactive_mode()
+        
+        # Iniciar consumer threads
+        t1 = threading.Thread(target=self.consumer_updates_loop, daemon=True)
+        t1.start()
+        
+        t2 = threading.Thread(target=self.consumer_telemetry_loop, daemon=True)
+        t2.start()
+        
+        # Dar tiempo a que los consumers se inicien
+        time.sleep(2)
+        
+        # Modo interactivo
+        self.interactive_mode()
+        
+        # Cleanup
+        self.log("Cerrando...")
+        if self.consumer_updates:
+            self.consumer_updates.close()
+        if self.consumer_telemetry:
+            self.consumer_telemetry.close()
+        if self.producer:
+            self.producer.close()
 
-def request_services_from_file_auto(filename):
-    """Versión automática sin interacción"""
-    try:
-        with open(filename, 'r') as f:
-            services = [line.strip() for line in f if line.strip()]
-        
-        print(f"📄 Cargados {len(services)} servicios")
-        
-        for idx, cp_id in enumerate(services, 1):
-            print(f"\n{'='*60}")
-            print(f"[{idx}/{len(services)}] Servicio en {cp_id}")
-            print(f"{'='*60}")
-            
-            success, message = request_service(cp_id)
-            
-            if success:
-                wait_for_service_completion()
-            else:
-                print(f"Denegado: {message}")
-            
-            if idx < len(services):
-                print("\n⏳ Esperando 4 segundos...")
-                time.sleep(4)
-        
-        print(f"\n{'='*60}")
-        print(f"✅ COMPLETADOS {len(services)} SERVICIOS")
-        print(f"{'='*60}")
-        
-    except Exception as e:
-        log_message(f"Error: {e}")
-
-if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        log_message('\n[DRIVER] 🛑 Interrupt recibido...')
-        cancel_current_service()
-        log_message('[DRIVER] 👋 Saliendo...')
-        sys.exit(0)
+if __name__ == "__main__":
+    driver = EVDriver(DRIVER_ID, KAFKA_BROKER)
+    driver.run()

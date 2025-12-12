@@ -1,28 +1,95 @@
 {
-    "charging_points": {
-        "CP001": {
-            "id": "CP001",
-            "location": "Valencia Centro",
-            "price": 0.35,
-            "state": "DESCONECTADO",
-            "current_kw": 0.0,
-            "current_euros": 0.0,
-            "current_driver": null,
-            "total_kwh": 0.0,
-            "last_update": "2025-12-02T11:55:45.129193"
-        },
-        "CP002": {
-            "id": "CP002",
-            "location": "Valencia Centro",
-            "price": 0.35,
-            "state": "DESCONECTADO",
-            "current_kw": 0.0,
-            "current_euros": 0.0,
-            "current_driver": null,
-            "total_kwh": 0.0,
-            "last_update": "2025-12-02T11:53:01.283425"
-        }
+  "charging_points": {
+    "CP001": {
+      "id": "CP001",
+      "location": "Valencia",
+      "price": 0.35,
+      "state": "DESCONECTADO",
+      "current_kw": 0.0,
+      "total_kwh": 0.0,
+      "current_euros": 0.0,
+      "current_driver": null,
+      "last_update": "2025-12-12T12:57:54.419550"
     },
-    "drivers": {},
-    "sessions": []
+    "CP002": {
+      "id": "CP002",
+      "location": "Ottawa",
+      "price": 0.35,
+      "state": "DESCONECTADO",
+      "current_kw": 0.0,
+      "total_kwh": 0.0,
+      "current_euros": 0.0,
+      "current_driver": null,
+      "last_update": "2025-12-12T12:57:45.905877"
+    }
+  },
+  "drivers": {},
+  "sessions": [
+    {
+      "session_id": "CP001_DRV001_1765542208",
+      "cp_id": "CP001",
+      "driver_id": "DRV001",
+      "start_time": "2025-12-12T12:23:27.643342",
+      "end_time": "2025-12-12T12:23:28.108622",
+      "total_kwh": 0.062,
+      "total_euros": 0.02,
+      "status": "completed"
+    },
+    {
+      "session_id": "CP001_DRV001_1765542627",
+      "cp_id": "CP001",
+      "driver_id": "DRV001",
+      "start_time": "2025-12-12T12:30:26.357128",
+      "end_time": "2025-12-12T12:30:27.283471",
+      "total_kwh": 0.03,
+      "total_euros": 0.01,
+      "status": "completed"
+    },
+    {
+      "session_id": "CP001_DRV001_1765542664",
+      "cp_id": "CP001",
+      "driver_id": "DRV001",
+      "start_time": "2025-12-12T12:31:03.310720",
+      "end_time": "2025-12-12T12:31:04.272134",
+      "total_kwh": 0.036,
+      "total_euros": 0.01,
+      "status": "completed"
+    },
+    {
+      "session_id": "CP001_DRV001_1765542666",
+      "cp_id": "CP001",
+      "driver_id": "DRV001",
+      "start_time": "2025-12-12T12:31:06.240276",
+      "end_time": "2025-12-12T12:31:06.833801",
+      "total_kwh": 0.005,
+      "total_euros": 0.0,
+      "status": "completed"
+    },
+    {
+      "session_id": "CP001_DRV001_1765544101",
+      "cp_id": "CP001",
+      "driver_id": "DRV001",
+      "start_time": "2025-12-12T12:55:01.630512",
+      "end_time": "2025-12-12T12:55:01.977356",
+      "total_kwh": 0.033,
+      "total_euros": 0.01,
+      "status": "completed"
+    }
+  ],
+  "credentials": {
+    "CP001": {
+      "username": "JCffH0A01Gg",
+      "password_hash": "da1ea237f77f504419db865f310cc4dbf414bbb69dc91173a8d5f4e936d53afa",
+      "created_at": "2025-12-12T12:22:52.098675"
+    },
+    "CP002": {
+      "username": "-yuItmjRxgE",
+      "password_hash": "a53e450397565c846f99b684705573729b031f842b83155cdfc1802bd9b663cb",
+      "created_at": "2025-12-12T12:53:21.716883"
+    }
+  },
+  "encryption_keys": {
+    "CP001": "448ZREgUnD1qBftN0PxNXmvsUCyG7fr8kQ0id+9mQcI=",
+    "CP002": "zl+BQ7kg7cgnBnPLuKj43A82GDQ8IkZ7TBTeMO3d7B4="
+  }
 }

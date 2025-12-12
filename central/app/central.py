@@ -8,10 +8,12 @@ from .cp_socket_server import CPSocketServer
 from .kafka_producer import KafkaCentralProducer
 from .kafka_consumer import KafkaCentralConsumer  # ✅ NUEVO
 from .data_manager import load_data, save_data, get_all_cps, get_cp, update_cp
+from .registry import registry_bp  # ✅ IMPORTAR REGISTRY
 
 # Crear aplicación Flask con SocketIO
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'evcharging_secret_2025'
+# ✅ Clave secreta generada aleatoriamente (24 bytes = 48 caracteres hex)
+app.config['SECRET_KEY'] = os.urandom(24).hex()
 
 socketio = SocketIO(
     app, 
@@ -20,6 +22,9 @@ socketio = SocketIO(
     logger=False,
     engineio_logger=False
 )
+
+# ✅ REGISTRAR REGISTRY BLUEPRINT
+app.register_blueprint(registry_bp)
 
 # Variable global para el producer y consumer
 kafka_producer = None
@@ -188,12 +193,7 @@ def main():
     # Inicializar Kafka Producer
     kafka_producer = KafkaCentralProducer()
     
-    # ✅ NUEVO: Inicializar Kafka Consumer
-    kafka_consumer = KafkaCentralConsumer(socketio=socketio)
-    kafka_consumer.start()
-    print("[CENTRAL] ✅ Kafka Consumer iniciado")
-    
-    # Iniciar servidor de sockets para CPs
+    # Iniciar servidor de sockets para CPs (ANTES del consumer)
     cp_server = CPSocketServer(
         host="0.0.0.0", 
         port=cp_port, 
@@ -201,8 +201,17 @@ def main():
         socketio=socketio
     )
     cp_server.start()
-    app.cp_server = cp_server  # ✅ Guardar referencia
+    app.cp_server = cp_server  # Guardar referencia
     print(f"[CENTRAL] ✅ Socket server iniciado en puerto {cp_port}")
+    
+    # ✅ Inicializar Kafka Consumer con socketio Y cp_server
+    kafka_consumer = KafkaCentralConsumer(
+        producer=kafka_producer, 
+        socketio=socketio,
+        cp_server=cp_server  # ✅ Pasar referencia
+    )
+    kafka_consumer.start()
+    print("[CENTRAL] ✅ Kafka Consumer iniciado")
     
     # Iniciar thread de broadcast WebSocket
     broadcast_thread = threading.Thread(target=broadcast_state_loop, daemon=True)
