@@ -97,7 +97,7 @@ python -m pip install -r requirements.txt
 
 [WINDOWS]
 
-$env:CENTRAL_API_URL="http://localhost:8000" //siempre en el ordenador de central
+$env:CENTRAL_API_URL="http://localhost:8000/api/charging_points" //cambiar si es fuera del pc de central
 $env:OPENWEATHER_API_KEY="f1dea33fe22bf6866d46ec98323cc7cd"
 python ev_w.py
 
@@ -105,4 +105,5 @@ python ev_w.py
 
 export OPENWEATHER_API_KEY="f1dea33fe22bf6866d46ec98323cc7cd"
 python ev_w.py
+
 
