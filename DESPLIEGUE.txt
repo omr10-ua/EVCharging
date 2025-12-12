@@ -1,0 +1,107 @@
+-SD Elsa y Óscar [DESPLIEGUE CORRECTO]
+
+MODIFICAR EN DOCKER-COMPOSE EL LISTENER EXTERNAL DE KAFKA PARA PODER CONECTARSE ENTRE SÍ LOS PC.
+
+# docker-compose up --build
+
+UNA VEZ SE LEVANTE CENTRAL
+
+CPS (VARIABLES DE ENTORNO)
+
+MONITORES:
+
+(Antes de iniciar, tener Python instalado y ejecutar el comando para instalar las librerías necesarias)
+
+# 2. Instalar dependencias Monitor
+cd ../ev_cp_m
+python -m pip install -r requirements.txt
+
+# 1. Instalar dependencias Engine
+cd cp/ev_cp_e
+python -m pip install -r requirements.txt
+
+[WINDOWS]
+
+$env:CP_ID="CP001"
+$env:CP_LOCATION="Valencia"
+$env:CP_PRICE="0.35"
+$env:REGISTRY_URL="http://localhost:8000/api/registry" //Se cambia por la IP del PC que esté Central.
+$env:CENTRAL_HOST="localhost"			//Se cambia por la IP del PC que esté Central.
+$env:CENTRAL_PORT="5001"
+$env:ENGINE_HOST="localhost"
+$env:ENGINE_PORT="9101"			//9201, 9301, 9401...
+$env:ENGINE_MONITOR_PORT="6060"		//6061, 6062, 6063...
+python main.py
+
+[LINUX/MAC]
+
+export CP_ID="CP001"
+export CP_LOCATION="Valencia"
+export CP_PRICE="0.35"
+export REGISTRY_URL="http://localhost:8000/api/registry" //Se cambia por la IP del PC que esté Central.
+export CENTRAL_HOST="localhost"				//Se cambia por la IP del PC que esté Central.
+export CENTRAL_PORT="5001"
+export ENGINE_HOST="localhost"
+export ENGINE_PORT="9101"
+export ENGINE_MONITOR_PORT="6060"	
+python main.py
+
+ENGINES:
+
+[WINDOWS]
+
+$env:CP_ID="CP001"
+$env:CP_LOCATION="Valencia"
+$env:CP_PRICE="0.35"
+$env:KAFKA_BROKER="localhost:29092"	//Se cambia por la IP del PC que esté Central.
+$env:HEALTH_CHECK_PORT="9101"		//9201, 9301, 9401...
+$env:KEY_RECEIVE_PORT="9102"		//9202, 9302, 9402...
+$env:MONITOR_PORT="6060"		//6061, 6062, 6063...
+python main.py
+
+[LINUX/MAC]
+
+export CP_ID="CP001"
+export CP_LOCATION="Valencia"
+export CP_PRICE="0.35"
+export KAFKA_BROKER="localhost:29092"	//Se cambia por la IP del PC que esté Central.
+export HEALTH_CHECK_PORT="9101"		//9201, 9301, 9401...
+export KEY_RECEIVE_PORT="9102"		//9202, 9302, 9402...
+export MONITOR_PORT="6060"		//6061, 6062, 6063...
+python main.py
+
+DRIVERS:
+
+# 1. Instalar dependencias
+cd driver
+python -m pip install -r requirements.txt
+
+(Antes de iniciar, tener Python instalado y ejecutar el comando para instalar las librerías necesarias)
+
+[WINDOWS]
+
+$env:DRIVER_ID="DRV001"
+$env:KAFKA_BROKER="localhost:29092"	//Cambiar por IP de donde esté central.
+python ev_driver.py
+
+[LINUX/MAC]
+
+export DRIVER_ID="DRV001"
+export KAFKA_BROKER="localhost:29092"	//Cambiar por IP de donde esté central.
+python ev_driver.py
+
+CUANDO PASE EL PROFESOR INICIAMOS EL WEATHER (PARA AHORRAR CONSULTAS A LA API)
+
+cd weather
+python -m pip install -r requirements.txt
+
+[WINDOWS]
+
+$env:CENTRAL_API_URL="http://localhost:8000" //Cambiar por IP si esta en otro PC que la central
+$env:OPENWEATHER_API_KEY="f1dea33fe22bf6866d46ec98323cc7cd"
+python ev_w.py
+
+[LINUX/MAC]
+
+export OPENWEATHER_API_KEY="f1dea33fe22bf6866d46ec98323cc7cd"
+python ev_w.py
